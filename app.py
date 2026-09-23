@@ -604,10 +604,19 @@ def alert_contratos_vencidos(df, ref_date):
         "CPF_FORMATADO", "SETOR", "VINCULO",
         "DATA DE INICIO - VINCULO", "ANOS_DESDE_INICIO",
         "CARGO", "OCUPACAO",
-        "CARGA HORARIA ESCALADA", "CARGA HORARIA",
     ]
     cols = [c for c in cols if c in out.columns]
-    return out[cols].sort_values("ANOS_DESDE_INICIO", ascending=False)
+    out = out[cols]
+    # Uma linha por contrato: CHAVE_ID identifica NUMFUNC + NUMVINC.
+    # O fallback evita perder registros quando a chave estiver vazia.
+    if "CHAVE_ID" in out.columns:
+        com_chave = out["CHAVE_ID"].astype(str).str.strip().ne("")
+        out_com_chave = out.loc[com_chave].drop_duplicates(subset=["CHAVE_ID"], keep="first")
+        out_sem_chave = out.loc[~com_chave].drop_duplicates(keep="first")
+        out = pd.concat([out_com_chave, out_sem_chave], ignore_index=True)
+    else:
+        out = out.drop_duplicates(keep="first")
+    return out.sort_values("ANOS_DESDE_INICIO", ascending=False).reset_index(drop=True)
 
 
 # ==================================================================

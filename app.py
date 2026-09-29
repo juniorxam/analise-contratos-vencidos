@@ -831,6 +831,21 @@ def style_sheet(ws, df, header_color="1F4E78"):
     if len(df) > 0:
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
+        ws.print_title_rows = "1:1"
+        ws.print_area = f"A1:{get_column_letter(len(df.columns))}{ws.max_row}"
+    # Deixa o arquivo pronto para impressão sem exigir ajustes manuais no Excel.
+    ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins.left = 0.25
+    ws.page_margins.right = 0.25
+    ws.page_margins.top = 0.45
+    ws.page_margins.bottom = 0.45
+    ws.page_margins.header = 0.2
+    ws.page_margins.footer = 0.2
+    ws.print_options.horizontalCentered = False
     ws.row_dimensions[1].height = 30
 
 
@@ -1128,10 +1143,10 @@ def main():
 
     st.markdown("---")
     st.subheader("Exportar análise")
-    st.caption("O Excel contém somente as duas análises exibidas no painel.")
+    st.caption("O Excel contém somente as análises exibidas após os filtros selecionados.")
     xlsx_bytes = df_to_excel_bytes({
-        "Contratos Vencidos": alerta_temp,
-        "NUMFUNC CPF": alerta_num,
+        "Contratos Vencidos": dados_temp,
+        "NUMFUNC CPF": dados_num,
     })
     st.download_button(
         "Baixar Excel da análise",

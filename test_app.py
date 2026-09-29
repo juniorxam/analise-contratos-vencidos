@@ -1,6 +1,7 @@
 import io
 
 import pandas as pd
+from openpyxl import load_workbook
 
 import app
 
@@ -56,3 +57,15 @@ def test_invalid_schema_returns_actionable_message():
 
     assert message is not None
     assert "cabeçalhos" in message
+
+
+def test_excel_export_is_configured_for_a4_landscape_one_page_width():
+    content = app.df_to_excel_bytes({"Dados": pd.DataFrame({"A": [1], "B": [2]})})
+    workbook = load_workbook(io.BytesIO(content))
+    sheet = workbook["Dados"]
+
+    assert sheet.page_setup.orientation == "landscape"
+    assert str(sheet.page_setup.paperSize) == str(sheet.PAPERSIZE_A4)
+    assert sheet.page_setup.fitToWidth == 1
+    assert sheet.page_setup.fitToHeight == 0
+    assert sheet.print_area == "'Dados'!$A$1:$B$2"

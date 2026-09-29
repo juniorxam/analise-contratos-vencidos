@@ -72,6 +72,64 @@ EXPECTED_COLS = [
 
 ACCEPTED_EXT = ["csv", "xls", "xlsx", "xlsm"]
 
+HEADER_ALIASES = {
+    "data de inicio vinculo": "DATA DE INICIO - VINCULO",
+    "data inicio vinculo": "DATA DE INICIO - VINCULO",
+    "data de inicio do vinculo": "DATA DE INICIO - VINCULO",
+    "descricao escala": "DESC. ESCALA",
+    "desc escala": "DESC. ESCALA",
+    "numero funcional": "NUMFUNC",
+    "numero do funcionario": "NUMFUNC",
+    "numero vinculo": "NUMVINC",
+    "nome servidor": "SERVIDOR",
+    "documento cpf": "CPF",
+}
+
+
+def header_key(value) -> str:
+    """Cria uma chave comparável para cabeçalhos com acentos e pontuação."""
+    text = safe_str(value).casefold()
+    text = "".join(
+        char for char in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(char)
+    )
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def canonicalize_columns(columns):
+    """Padroniza cabeçalhos e evita colisões em arquivos com colunas repetidas."""
+    used = set()
+    result = []
+    for raw_name in columns:
+        clean_name = re.sub(r"\s+", " ", safe_str(raw_name)).strip()
+        canonical = HEADER_ALIASES.get(header_key(clean_name), clean_name.upper())
+        if canonical in used:
+            suffix = 2
+            candidate = f"{canonical}_{suffix}"
+            while candidate in used:
+                suffix += 1
+            canonical = candidate
+        used.add(canonical)
+        result.append(canonical)
+    return result
+
+
+def validate_source_schema(df):
+    """Retorna mensagem acionável quando o arquivo não parece ser a planilha esperada."""
+    recognized = set(canonicalize_columns(df.columns)) & set(EXPECTED_COLS)
+    if not recognized:
+        return (
+            "Não foi possível identificar os cabeçalhos da planilha. "
+            "Confira se o arquivo contém colunas como NUMFUNC, NUMVINC, "
+            "SERVIDOR, CPF ou DATA DE INICIO - VINCULO."
+        )
+    if not (recognized & {"NUMFUNC", "NUMVINC", "SERVIDOR", "CPF"}):
+        return (
+            "A planilha foi lida, mas não contém uma coluna de identificação "
+            "de servidor (NUMFUNC, NUMVINC, SERVIDOR ou CPF)."
+        )
+    return None
+
 
 def format_br_number(value, decimals=2, signed=False):
     """Formata número no padrão brasileiro: 1.234,56."""
@@ -205,7 +263,7 @@ def parse_raw(raw):
         body = col.iloc[hi + 1:].str.split("\t", expand=True)
         n = min(body.shape[1], len(header))
         body = body.iloc[:, :n]
-        body.columns = header[:n]
+        body.columns = canonicalize_columns(header[:n])
         return body.reset_index(drop=True)
 
     hi = 0
@@ -215,7 +273,7 @@ def parse_raw(raw):
             hi = i
             break
     df = raw.iloc[hi + 1:].copy()
-    df.columns = [str(v).strip() for v in raw.iloc[hi].tolist()]
+    df.columns = canonicalize_columns(raw.iloc[hi].tolist())
     return df.reset_index(drop=True)
 
 
@@ -241,6 +299,26 @@ def to_int_str(v):
     if re.fullmatch(r"-?\d+\.0+", s):
         return s.split(".")[0]
     return s
+
+
+def parse_br_number(value):
+    """Converte números como ``1.234,50`` e ``1234.50`` sem misturar separadores."""
+    text = safe_str(value)
+    if not text:
+        return np.nan
+    text = re.sub(r"\s+", "", text)
+    if "," in text and "." in text:
+        # O último separador costuma ser o decimal no padrão brasileiro.
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        text = text.replace(",", ".")
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return np.nan
 
 
 def only_digits(v: str) -> str:
@@ -464,14 +542,8 @@ def clean(df):
     df["NUMFUNC"] = df["NUMFUNC"].apply(to_int_str)
     df["NUMVINC"] = df["NUMVINC"].apply(to_int_str)
 
-    df["CARGA HORARIA ESCALADA"] = pd.to_numeric(
-        df["CARGA HORARIA ESCALADA"].str.replace(",", ".", regex=False),
-        errors="coerce",
-    )
-    df["CARGA HORARIA"] = pd.to_numeric(
-        df["CARGA HORARIA"].str.replace(",", ".", regex=False),
-        errors="coerce",
-    )
+    df["CARGA HORARIA ESCALADA"] = df["CARGA HORARIA ESCALADA"].map(parse_br_number)
+    df["CARGA HORARIA"] = df["CARGA HORARIA"].map(parse_br_number)
 
     df["CPF"] = df["CPF"].apply(normalize_identifier)
     df["CPF_FORMATADO"] = df["CPF"].apply(format_cpf)
@@ -966,93 +1038,108 @@ def build_pdf_report(df_filtered, unidade, escala, ref_date_str, detailed=False)
 
 # ==================================================================
 # UI — análise objetiva de contratos vencidos e NUMFUNC = CPF
-# ==================================================================
-st.markdown("""
-<div class="hero">
-  <div class="section-kicker" style="color:#99F6E4">Análise cadastral</div>
-  <h1>Contratos vencidos</h1>
-  <p>Identifique contratos temporários vencidos e registros em que o NUMFUNC é igual ao CPF.</p>
-</div>
-""", unsafe_allow_html=True)
+def main():
+    # ==================================================================
+    st.markdown("""
+    <div class="hero">
+      <div class="section-kicker" style="color:#99F6E4">Análise cadastral</div>
+      <h1>Contratos vencidos</h1>
+      <p>Identifique contratos temporários vencidos e registros em que o NUMFUNC é igual ao CPF.</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-with st.sidebar:
-    st.header("Filtros")
-    ref_date = st.date_input("Data de referência", value=datetime.today().date())
-    st.caption("Contrato temporário vencido = início há mais de 2 anos da data escolhida.")
+    with st.sidebar:
+        st.header("Filtros")
+        ref_date = st.date_input("Data de referência", value=datetime.today().date())
+        st.caption("Contrato temporário vencido = início há mais de 2 anos da data escolhida.")
 
-uploaded = st.file_uploader(
-    "Envie a planilha de contratos",
-    type=ACCEPTED_EXT,
-    help="Aceita CSV, XLS, XLSX e XLSM.",
-)
+    uploaded = st.file_uploader(
+        "Envie a planilha de contratos",
+        type=ACCEPTED_EXT,
+        help="Aceita CSV, XLS, XLSX e XLSM.",
+    )
 
-if uploaded is None:
-    st.info("Envie uma planilha para iniciar a análise.")
-    st.stop()
+    if uploaded is None:
+        st.info("Envie uma planilha para iniciar a análise.")
+        st.stop()
 
-try:
-    raw = read_any(uploaded.getvalue(), uploaded.name)
-    df = clean(parse_raw(raw))
-except Exception as e:
-    st.error(f"Não foi possível processar `{uploaded.name}`: {e}")
-    st.stop()
+    try:
+        raw = read_any(uploaded.getvalue(), uploaded.name)
+        parsed = parse_raw(raw)
+        schema_error = validate_source_schema(parsed)
+        if schema_error:
+            st.error(schema_error)
+            st.info("Dica: exporte a tabela com a primeira linha contendo os nomes das colunas e envie novamente.")
+            st.stop()
+        df = clean(parsed)
+    except Exception as e:
+        st.error(f"Não foi possível processar `{uploaded.name}`: {e}")
+        st.stop()
 
-if len(df) == 0:
-    st.warning("Nenhum registro válido encontrado na planilha.")
-    st.stop()
+    if len(df) == 0:
+        st.warning("Nenhum registro válido encontrado na planilha.")
+        st.stop()
+    alerta_temp = alert_contratos_vencidos(df, pd.Timestamp(ref_date))
+    alerta_num = alert_numfunc_cpf(df)
+    st.success(f"Arquivo processado: {format_br_int(len(df))} registro(s).")
+    invalid_dates = int(df["DATA DE INICIO - VINCULO"].isna().sum())
+    if invalid_dates:
+        st.warning(
+            f"{format_br_int(invalid_dates)} registro(s) sem uma data de início válida "
+            "não entram na regra de contratos vencidos."
+        )
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Contratos vencidos", format_br_int(len(alerta_temp)))
+    k2.metric("NUMFUNC = CPF", format_br_int(len(alerta_num)))
+    k3.metric("Data de referência", pd.Timestamp(ref_date).strftime("%d/%m/%Y"))
 
-alerta_temp = alert_contratos_vencidos(df, pd.Timestamp(ref_date))
-alerta_num = alert_numfunc_cpf(df)
+    def filtrar_por_setor(data, key):
+        if len(data) == 0:
+            return data
+        setores = ["(Todos)"] + sorted(data["SETOR"].replace("", "(SEM SETOR)").unique().tolist())
+        setor = st.selectbox("Filtrar por setor", setores, key=key)
+        out = data.copy()
+        out["_SETOR_FILTRO"] = out["SETOR"].replace("", "(SEM SETOR)")
+        if setor != "(Todos)":
+            out = out[out["_SETOR_FILTRO"] == setor]
+        return out.drop(columns=["_SETOR_FILTRO"])
 
-st.success(f"Arquivo processado: {format_br_int(len(df))} registro(s).")
-k1, k2, k3 = st.columns(3)
-k1.metric("Contratos vencidos", format_br_int(len(alerta_temp)))
-k2.metric("NUMFUNC = CPF", format_br_int(len(alerta_num)))
-k3.metric("Data de referência", pd.Timestamp(ref_date).strftime("%d/%m/%Y"))
+    tab_vencidos, tab_numfunc = st.tabs(["Contratos vencidos", "NUMFUNC = CPF"])
 
-def filtrar_por_setor(data, key):
-    if len(data) == 0:
-        return data
-    setores = ["(Todos)"] + sorted(data["SETOR"].replace("", "(SEM SETOR)").unique().tolist())
-    setor = st.selectbox("Filtrar por setor", setores, key=key)
-    out = data.copy()
-    out["_SETOR_FILTRO"] = out["SETOR"].replace("", "(SEM SETOR)")
-    if setor != "(Todos)":
-        out = out[out["_SETOR_FILTRO"] == setor]
-    return out.drop(columns=["_SETOR_FILTRO"])
+    with tab_vencidos:
+        st.subheader("Contratos temporários vencidos")
+        st.caption("Vínculo temporário com início há mais de 2 anos. A data de referência está na barra lateral.")
+        dados_temp = filtrar_por_setor(alerta_temp, "setor_contratos_vencidos")
+        if len(dados_temp) == 0:
+            st.success("Nenhum contrato vencido encontrado para os filtros selecionados.")
+        else:
+            st.warning(f"{format_br_int(len(dados_temp))} contrato(s) vencido(s).")
+            display_dataframe(dados_temp, use_container_width=True, hide_index=True, height=500)
 
-tab_vencidos, tab_numfunc = st.tabs(["Contratos vencidos", "NUMFUNC = CPF"])
+    with tab_numfunc:
+        st.subheader("Registros em que NUMFUNC = CPF")
+        st.caption("A comparação considera apenas os dígitos e ignora zeros à esquerda.")
+        dados_num = filtrar_por_setor(alerta_num, "setor_numfunc_cpf")
+        if len(dados_num) == 0:
+            st.success("Nenhum registro com NUMFUNC igual ao CPF encontrado.")
+        else:
+            st.warning(f"{format_br_int(len(dados_num))} registro(s) encontrado(s).")
+            display_dataframe(dados_num, use_container_width=True, hide_index=True, height=500)
 
-with tab_vencidos:
-    st.subheader("Contratos temporários vencidos")
-    st.caption("Vínculo temporário com início há mais de 2 anos. A data de referência está na barra lateral.")
-    dados_temp = filtrar_por_setor(alerta_temp, "setor_contratos_vencidos")
-    if len(dados_temp) == 0:
-        st.success("Nenhum contrato vencido encontrado para os filtros selecionados.")
-    else:
-        st.warning(f"{format_br_int(len(dados_temp))} contrato(s) vencido(s).")
-        display_dataframe(dados_temp, use_container_width=True, hide_index=True, height=500)
+    st.markdown("---")
+    st.subheader("Exportar análise")
+    st.caption("O Excel contém somente as duas análises exibidas no painel.")
+    xlsx_bytes = df_to_excel_bytes({
+        "Contratos Vencidos": alerta_temp,
+        "NUMFUNC CPF": alerta_num,
+    })
+    st.download_button(
+        "Baixar Excel da análise",
+        data=xlsx_bytes,
+        file_name=f"analise_contratos_vencidos_{datetime.today().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
-with tab_numfunc:
-    st.subheader("Registros em que NUMFUNC = CPF")
-    st.caption("A comparação considera apenas os dígitos e ignora zeros à esquerda.")
-    dados_num = filtrar_por_setor(alerta_num, "setor_numfunc_cpf")
-    if len(dados_num) == 0:
-        st.success("Nenhum registro com NUMFUNC igual ao CPF encontrado.")
-    else:
-        st.warning(f"{format_br_int(len(dados_num))} registro(s) encontrado(s).")
-        display_dataframe(dados_num, use_container_width=True, hide_index=True, height=500)
 
-st.markdown("---")
-st.subheader("Exportar análise")
-st.caption("O Excel contém somente as duas análises exibidas no painel.")
-xlsx_bytes = df_to_excel_bytes({
-    "Contratos Vencidos": alerta_temp,
-    "NUMFUNC CPF": alerta_num,
-})
-st.download_button(
-    "Baixar Excel da análise",
-    data=xlsx_bytes,
-    file_name=f"analise_contratos_vencidos_{datetime.today().strftime('%Y%m%d')}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
+if __name__ == "__main__":
+    main()
